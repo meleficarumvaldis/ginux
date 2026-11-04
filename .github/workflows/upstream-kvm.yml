@@ -1,0 +1,126 @@
+name: upstream-kvm
+
+# Builds and boots the current main of gmkurtzer/ginux under KVM on an AMD
+# EPYC (Zen 3) GitHub-hosted runner. Upstream CI boots under TCG on macOS, so
+# AMD-specific and KVM-specific failures only show up here.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to test (default: main)"
+        required: false
+        default: "main"
+      force:
+        description: "Test even if this commit was already tested"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-kvm
+  cancel-in-progress: false
+
+jobs:
+  kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Resolve the upstream commit
+        id: upstream
+        run: |
+          ref="${{ inputs.ref || 'main' }}"
+          sha=$(git ls-remote https://github.com/gmkurtzer/ginux.git "refs/heads/$ref" | cut -f1)
+          [ -n "$sha" ] || sha=$(git ls-remote https://github.com/gmkurtzer/ginux.git "$ref" | cut -f1)
+          [ -n "$sha" ] || { echo "unknown ref $ref"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Testing gmkurtzer/ginux $ref at $sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip commits that were already tested
+        id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .tested
+          key: tested-${{ steps.upstream.outputs.sha }}
+          lookup-only: true
+
+      - name: Check out upstream
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        uses: actions/checkout@v5
+        with:
+          repository: gmkurtzer/ginux
+          ref: ${{ steps.upstream.outputs.sha }}
+          persist-credentials: false
+
+      - name: Install QEMU, OVMF and the toolchain
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes qemu-system-x86 ovmf ripgrep
+          rustup target add x86_64-unknown-uefi x86_64-unknown-none
+          # Let the runner user open /dev/kvm.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          lscpu | grep -E 'Model name|Virtualization'
+          qemu-system-x86_64 --version | head -1
+
+      - name: make check
+        id: check
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        run: make check
+
+      - name: Boot verification under KVM
+        id: boot
+        if: steps.check.outcome == 'success'
+        run: |
+          make build-verification
+          set -o pipefail
+          QEMU_ACCEL=kvm tests/qemu/boot.sh 2>&1 | tee boot-kvm.log
+
+      - name: Summary
+        if: always() && (steps.seen.outputs.cache-hit != 'true' || inputs.force)
+        run: |
+          {
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| make check | ${{ steps.check.outcome }} |"
+            echo "| boot.sh under KVM (AMD EPYC 7763) | ${{ steps.boot.outcome }} |"
+            if [ -f boot-kvm.log ]; then
+              echo
+              echo '<details><summary>Last lines of the boot log</summary>'
+              echo
+              echo '```'
+              tail -40 boot-kvm.log
+              echo '```'
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always() && (steps.seen.outputs.cache-hit != 'true' || inputs.force)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ginux-kvm-${{ steps.upstream.outputs.sha }}
+          path: |
+            boot-kvm.log
+            build/qemu/*.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Remember the tested commit
+        if: always() && (steps.seen.outputs.cache-hit != 'true' || inputs.force)
+        run: mkdir -p .tested && echo "${{ steps.upstream.outputs.sha }}" > .tested/sha
+
+      - name: Save the tested marker
+        if: always() && steps.seen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tested
+          key: tested-${{ steps.upstream.outputs.sha }}
