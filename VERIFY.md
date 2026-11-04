@@ -6,12 +6,12 @@ issue 11 (11a, then 11b). Each one applies alone and passes `make check`.
 `fix/<NN>-<slug>` in github.com/meleficarumvaldis/ginux, which is what the PRs
 are opened from. They stack in the order given below. The combined series, 29
 commits rebased and tested on `origin/main` c8d12653 (after #39), is
-`git am`-able from the `series` of `fix/` branches (or ask for the mbox). Patch 21 is not part of it, because it is offered
+`git am`-able from `series/`. Patch 21 is not part of it, because it is offered
 for discussion.
 
-All measurements were taken on an AMD Ryzen Threadripper PRO 5975WX (Zen 3),
+All measurements were taken on an AMD Zen 3,
 openSUSE Tumbleweed, QEMU 11.1.2, KVM, openSUSE OVMF 4M firmware. The Linux
-reference values come from running the same probe on Linux 7.3.0-rc5.
+reference values come from running the same probe on Linux 7.3.
 
 ## 0. Environment notes
 
