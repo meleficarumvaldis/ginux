@@ -1,0 +1,25 @@
+# Issue 02 runtime probe: command blocks fed to an attached alpine:latest shell via repro/domain-exp2.sh (marker EXP_END, timeout 90)
+## E
+nice -n 1 sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' &
+sleep 30; printf 'EXP_END\n'
+## B
+nice -n 1 sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' &
+sh -c 'n=0; while [ $n -lt 1000000 ]; do n=$((n+1)); done; echo EXP_HIGH_DONE'
+sleep 20; printf 'EXP_END\n'
+## W
+sleep 3 & wait; echo EXP_W1
+nice -n 1 sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' & wait; echo EXP_W2
+printf 'EXP_END\n'
+## N19
+nice -n 19 sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' &
+sh -c 'n=0; while [ $n -lt 1000000 ]; do n=$((n+1)); done; echo EXP_HIGH_DONE'
+sleep 20; printf 'EXP_END\n'
+## X
+env sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' &
+sleep 10; printf 'EXP_END\n'
+## F
+sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE' &
+sleep 10; printf 'EXP_END\n'
+## G
+(/bin/true; exec env sh -c 'n=0; while [ $n -lt 100000 ]; do n=$((n+1)); done; echo EXP_LOW_DONE') &
+sleep 10; printf 'EXP_END\n'
