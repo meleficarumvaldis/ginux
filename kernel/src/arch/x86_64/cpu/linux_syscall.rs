@@ -169,13 +169,26 @@ pub(super) extern "sysv64" fn linux_syscall_handler(
         LINUX_SOCKET_SYSCALL => linux_socket_create(first_argument, buffer, count),
         LINUX_SOCKETPAIR_SYSCALL => linux_socket_pair(first_argument, buffer, count, register(0)),
         LINUX_CONNECT_SYSCALL => linux_socket_connect(first_argument, buffer, count),
-        LINUX_ACCEPT_SYSCALL => linux_socket_accept(first_argument, buffer, count, 0),
+        LINUX_ACCEPT_SYSCALL => linux_socket_accept(
+            Some((registers, syscall_return, LINUX_ACCEPT_SYSCALL)),
+            first_argument,
+            buffer,
+            count,
+            0,
+        ),
         LINUX_BIND_SYSCALL => linux_socket_bind(first_argument, buffer, count),
         LINUX_LISTEN_SYSCALL => linux_socket_listen(first_argument, buffer),
-        LINUX_ACCEPT4_SYSCALL => linux_socket_accept(first_argument, buffer, count, register(0)),
+        LINUX_ACCEPT4_SYSCALL => linux_socket_accept(
+            Some((registers, syscall_return, LINUX_ACCEPT4_SYSCALL)),
+            first_argument,
+            buffer,
+            count,
+            register(0),
+        ),
         LINUX_SENDTO_SYSCALL => {
             let flags = register(0);
             let result = linux_socket_sendto(
+                Some((registers, syscall_return, LINUX_SENDTO_SYSCALL)),
                 first_argument,
                 buffer,
                 count,

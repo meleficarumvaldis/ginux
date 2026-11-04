@@ -27803,6 +27803,48 @@ fn linux_socket_error(error: crate::linux_socket::Error) -> u64 {
     }
 }
 
+// Without SO_RCVTIMEO/SO_SNDTIMEO Linux waits indefinitely
+// (sock_init_data_uid() sets sk_rcvtimeo/sk_sndtimeo to MAX_SCHEDULE_TIMEOUT),
+// so a spent BLOCKING_POLL_LIMIT round must not become EAGAIN. Like the Unix
+// receive path, run a running child or restart the syscall through the
+// scheduler so kernel entry is not held across rounds. `None` means the
+// syscall was restarted. Sockets with a timeout and PID 1, which cannot
+// restart, keep the bounded EAGAIN.
+fn linux_socket_blocking_live<T>(
+    live: Option<(*mut LinuxSyscallFrame, LinuxUserContext, u64)>,
+    slot: u8,
+    option: crate::linux_socket::TimeoutOption,
+    mut attempt: impl FnMut() -> Result<T, crate::linux_socket::Error>,
+) -> Option<Result<T, crate::linux_socket::Error>> {
+    loop {
+        let result = attempt();
+        let Some((output, caller, syscall)) = live else {
+            return Some(result);
+        };
+        if !matches!(result, Err(crate::linux_socket::Error::WouldBlock))
+            || !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
+            || crate::linux_socket::kind(slot) != Some(crate::linux_socket::Kind::Tcp)
+            || !matches!(crate::linux_socket::timeout_option(slot, option), Ok(0))
+        {
+            return Some(result);
+        }
+        let parent_pid = current_linux_process_pid();
+        if let Some(child) = linux_process::live_running_child_pid(parent_pid) {
+            if refresh_live_linux_process_registry(caller)
+                && run_scheduled_linux_process(parent_pid, Some(child))
+                && restore_linux_process_live_return(output, parent_pid)
+            {
+                continue;
+            }
+            return Some(result);
+        }
+        if parent_pid != 1 && restart_current_linux_process_syscall(caller, syscall) {
+            return None;
+        }
+        return Some(result);
+    }
+}
+
 fn linux_socket_descriptor_index(descriptor: u64) -> Option<usize> {
     let descriptor = u64::from(descriptor as u32);
     let index = descriptor.checked_sub(LINUX_AUX_DESCRIPTOR_FIRST)? as usize;
@@ -28101,7 +28143,13 @@ fn linux_socket_accept_address_valid(address: u64, length: u64) -> bool {
         && linux_writable_user_range_contains(address, address_length)
 }
 
-fn linux_socket_accept(descriptor: u64, address: u64, length: u64, flags: u64) -> u64 {
+fn linux_socket_accept(
+    live: Option<(*mut LinuxSyscallFrame, LinuxUserContext, u64)>,
+    descriptor: u64,
+    address: u64,
+    length: u64,
+    flags: u64,
+) -> u64 {
     const SOCK_NONBLOCK: u64 = 0x800;
     const SOCK_CLOEXEC: u64 = 0x8_0000;
     let flags = u64::from(flags as u32);
@@ -28122,7 +28170,15 @@ fn linux_socket_accept(descriptor: u64, address: u64, length: u64, flags: u64) -
     let accepted = if linux_socket_nonblocking(descriptor) {
         crate::linux_socket::accept(listener_slot)
     } else {
-        crate::linux_socket::accept_blocking(listener_slot)
+        match linux_socket_blocking_live(
+            live,
+            listener_slot,
+            crate::linux_socket::TimeoutOption::Receive,
+            || crate::linux_socket::accept_blocking(listener_slot),
+        ) {
+            Some(result) => result,
+            None => return LINUX_RETURN_TO_KERNEL,
+        }
     };
     let (accepted_slot, remote) = match accepted {
         Ok(accepted) => accepted,
@@ -28169,6 +28225,7 @@ fn linux_socket_connect(descriptor: u64, address: u64, length: u64) -> u64 {
 }
 
 fn linux_socket_sendto(
+    live: Option<(*mut LinuxSyscallFrame, LinuxUserContext, u64)>,
     descriptor: u64,
     address: u64,
     count: u64,
@@ -28218,7 +28275,15 @@ fn linux_socket_sendto(
     let result = if flags & 0x40 != 0 || linux_socket_nonblocking(descriptor) {
         crate::linux_socket::send(slot, &bytes[..length], remote)
     } else {
-        crate::linux_socket::send_blocking(slot, &bytes[..length], remote)
+        match linux_socket_blocking_live(
+            live,
+            slot,
+            crate::linux_socket::TimeoutOption::Send,
+            || crate::linux_socket::send_blocking(slot, &bytes[..length], remote),
+        ) {
+            Some(result) => result,
+            None => return LINUX_RETURN_TO_KERNEL,
+        }
     };
     match result {
         Ok(written) => {
@@ -28288,7 +28353,22 @@ fn linux_socket_recvfrom(
             }
         }
     } else {
-        crate::linux_socket::recv_message_blocking(slot, &mut bytes[..length], peek_only, wait_all)
+        match linux_socket_blocking_live(
+            live,
+            slot,
+            crate::linux_socket::TimeoutOption::Receive,
+            || {
+                crate::linux_socket::recv_message_blocking(
+                    slot,
+                    &mut bytes[..length],
+                    peek_only,
+                    wait_all,
+                )
+            },
+        ) {
+            Some(result) => result,
+            None => return LINUX_RETURN_TO_KERNEL,
+        }
     };
     let (received, message_length, endpoint) = match result {
         Ok(result) => result,
@@ -28651,12 +28731,22 @@ fn linux_socket_recvmsg(
             }
         }
     } else {
-        crate::linux_socket::recv_message_blocking(
+        match linux_socket_blocking_live(
+            live,
             slot,
-            &mut bytes[..capacity],
-            peek_only,
-            wait_all,
-        )
+            crate::linux_socket::TimeoutOption::Receive,
+            || {
+                crate::linux_socket::recv_message_blocking(
+                    slot,
+                    &mut bytes[..capacity],
+                    peek_only,
+                    wait_all,
+                )
+            },
+        ) {
+            Some(result) => result,
+            None => return LINUX_RETURN_TO_KERNEL,
+        }
     };
     let (received, message_length, endpoint) = match result {
         Ok(result) => result,
@@ -33804,7 +33894,7 @@ fn linux_descriptor_write(descriptor: u64, address: u64, count: u64) -> u64 {
         if device & LINUX_DEVICE_PIPE != 0 && device & 3 & LINUX_DESCRIPTOR_OUTPUT == 0 {
             return LINUX_EBADF;
         }
-        return linux_socket_sendto(descriptor, address, count, 0, 0, 0);
+        return linux_socket_sendto(None, descriptor, address, count, 0, 0, 0);
     }
     if descriptor == 2
         && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
