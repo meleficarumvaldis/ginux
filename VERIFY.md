@@ -5,7 +5,7 @@ issue 11 (11a, then 11b). Each one applies alone and passes `make check`.
 22a and 22b need 18 first. Each patch is also published as a branch
 `fix/<NN>-<slug>` in github.com/meleficarumvaldis/ginux, which is what the PRs
 are opened from. They stack in the order given below. The combined series, 29
-commits rebased and tested on `origin/main` c8d12653 (after #39), is
+commits plus 29–32, 33 in total, rebased and tested on `origin/main` c8d12653 (after #39), is
 `git am`-able from `series/`. Patch 21 is not part of it, because it is offered
 for discussion.
 
@@ -59,6 +59,10 @@ probes below.
 | 25 O_CREAT\|O_EXCL on an existing symlink (security) | probe: dangling link target no longer created, image link no longer replaced | `probe-25.py` |
 | 26 renameat2(RENAME_EXCHANGE) | host test `exchanged_path_swaps_whole_subtrees`; boot marker `Linux renameat2 RENAME_EXCHANGE swapped names` | `probe-26.py` |
 | 27 pwrite O_APPEND, SEEK_DATA/HOLE, fallocate, ftruncate | extended `verify_linux_memfd_seals`; probe | `probe-27.py` |
+| 29 path-bound AF_UNIX sockets create a socket file | probe: lstat S_ISSOCK, EADDRINUSE, connect by inode | `probe-29.py` |
+| 30 POSIX, OFD and flock locks between processes | 9 host tests in `linux_file_lock.rs` (`make check-file-lock`); boot marker `Linux file locks conflict between open file descriptions` | `probe-30.py` (39 rows, all as on Linux) |
+| 31 overlay symlinks mid-path, relative symlink targets, ELOOP after 40 | boot check `verify_linux_symlink_path_walk` (negative control: SysV index 51) | `probe-31.py` |
+| 32 copied-up image directories keep their image entries (best with 16) | probe incl. `touch /etc` and `tar` with a `usr/` entry; host reference from a real overlayfs (`unshare -rm`) | `probe-32.py` |
 | 28 power-loss tests for the volume commits (tests only) | 3 quick tests in `make check`; one `#[ignore]`d full matrix; fails when the prepared-header flush is removed | `cargo test -p ginux-volume-service`; `cargo test -p ginux-volume-service --release -- --ignored crash_tests::full` |
 
 ## 2. Running a probe inside Ginux
@@ -99,7 +103,7 @@ least once, because only that timing reproduced the domain failure fixed by
 Order used for stacking (conflicts resolved, see below):
 
 ```
-01 04 05 03 13 06 02 07 08 09 10 12 17 11a 11b 14 15 16 19 18 20 22a 22b 23 24 25 26 27 28
+01 04 05 03 13 06 02 07 08 09 10 12 17 11a 11b 14 15 16 19 18 20 22a 22b 23 24 25 26 27 28 29 30 31 32
 ```
 
 Conflicts and their resolution:
@@ -147,6 +151,10 @@ Conflicts and their resolution:
   pos == -1 and only an append flag returns EOPNOTSUPP, like every flagged
   pos == -1 call in 11b.
 - **28**: no conflict (tests only, applies alone and on top of 13).
+- **29 × 27**: `LINUX_ENXIO` is defined once. 29 also adds a `Socket => 12` arm to the series' `linux_overlay_dirent_kind()`.
+- **30 × 15**: both add a boot verifier at the same spot. Both are kept, the hard-link one first.
+- **31 × 24/25/15**: 24's ENOTDIR check now runs on the path after symlink resolution. 31's ELOOP is returned alongside it in openat, newfstatat, statx and faccessat. The relative-target fix lives in 15's final-link loop, and 25's O_EXCL check stays before it.
+- **32**: no conflict.
 
 ## 4. Known interaction when 07 and 20 are both applied
 
@@ -167,16 +175,16 @@ The series was tested on `origin/main` d11670e4, then 7fdc880e, and last on
 
 | Check | Upstream `main` on this AMD host | Series on c8d12653 |
 |---|---|---|
-| `make check` | pass | pass (01–28) |
-| `tests/qemu/boot.sh` KVM | fails: panic #GP(0x28) (patch 01 missing); with patch 01 alone, native-volume failure in 3/3 runs | **2/2** with 01–22b; **2/2** with 23–27 on top (also 2/2 on 7fdc880e and d11670e4, 3/3 on 6324692b) |
-| `tests/qemu/boot.sh` TCG | pass | 01–22b: 5/5. With 23–27 on top: **9/10**. The one failure was "recovery boot did not prove native volume IOMMU lifecycle isolation": the second boot stopped after the Linux runtime tests. It did not recur in 9 further runs, and we could not attribute it to a patch. We report it as possible TCG flakiness, not as fixed or explained |
+| `make check` | pass | pass (01–32) |
+| `tests/qemu/boot.sh` KVM | fails: panic #GP(0x28) (patch 01 missing); with patch 01 alone, native-volume failure in 3/3 runs | **2/2** with 01–22b; **2/2** with 23–27 on top, **2/2** with 29–32 on top (also 2/2 on 7fdc880e and d11670e4, 3/3 on 6324692b) |
+| `tests/qemu/boot.sh` TCG | pass | 01–22b: 5/5. With 23–27 on top: **9/10**. With 29–32 on top: pass. The one failure was "recovery boot did not prove native volume IOMMU lifecycle isolation": the second boot stopped after the Linux runtime tests. It did not recur in 9 further runs, and we could not attribute it to a patch. We report it as possible TCG flakiness, not as fixed or explained |
 | `python:3.13-alpine` image | does not unpack | runs |
 | probe-07 futex/time | see issue 07 | **48/50**: the two documented rows, `futex_wake_op` ENOSYS and `nanosleep_bad_rmtp_interrupted` |
 | probe-18 threads | `can't start new thread` | **5/5** |
 | probe-20 subprocess/poll/select | `subprocess` capture hangs | **14/14** |
 | probe-22 threads/futex/sleep | futex wakes 0/1, thread sleep hangs domain | **15/15**: 3/3 runs via heredoc on c8d12653, 2/2 via `wget` on 7fdc880e |
 
-With 23–27 on top, every probe was rerun. No row changed against the standalone
+With 23–27 and again with 29–32 on top, every probe was rerun. 29–32 changed exactly the seven targeted probe-fs4 rows (Unix socket file, POSIX/OFD/flock locks, symlink mid-path, relative symlink target, utime on an image directory), all to the Linux value. probe-30 matches Linux 39/39 and probe-31 15/15. No row changed against the standalone
 "after" runs except the expected `probe-fs3 append_pwrite`. The rows that still
 differ from Linux are all classified in the issues:
 
